@@ -34,28 +34,30 @@ function extractGeometry(result: unknown): unknown | null {
   return null;
 }
 
-function getApiKey(): string {
-  const key = process.env.INTELLIPINS_API_KEY;
-  if (!key) {
-    throw new Error(
-      "INTELLIPINS_API_KEY environment variable is not set. " +
-        "Add it to your MCP config or export it before starting the server."
-    );
+function getAuthHeader(): Record<string, string> {
+  const token = process.env.INTELLIPINS_BEARER_TOKEN;
+  if (token) {
+    return { Authorization: `Bearer ${token}` };
   }
-  return key;
+  const key = process.env.INTELLIPINS_API_KEY;
+  if (key) {
+    return { "X-API-KEY": key };
+  }
+  throw new Error(
+    "No Intellipins credentials found. Set either INTELLIPINS_BEARER_TOKEN or INTELLIPINS_API_KEY."
+  );
 }
 
 async function callApi(
   endpoint: string,
   body: Record<string, unknown>
 ): Promise<unknown> {
-  const apiKey = getApiKey();
   const response = await fetch(`${BASE_URL}${endpoint}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
-      "X-API-KEY": apiKey,
+      ...getAuthHeader(),
     },
     body: JSON.stringify(body),
   });
@@ -101,7 +103,7 @@ ADDRESS TYPE — always explain document.address_type to the user when present:
 
 ALWAYS show ipins_id prominently in your output. If absent, state: "ipins_id: not available (low-confidence or unmatched address)"
 
-AFTER this call, offer to run parcel_lookup (if ipins_id is present) or property_search_urls to find details on Zillow/Redfin.`,
+AFTER this call, offer to run parcel_lookup (if ipins_id is present) or property_search_urls to find listing details online.`,
   {
     address: z
       .string()
@@ -178,7 +180,7 @@ ADDRESS TYPE — always explain document.address_type to the user when present:
 
 ALWAYS show ipins_id prominently in your output. If absent, state: "ipins_id: not available (low-confidence match)"
 
-AFTER this call, offer to run parcel_lookup (if ipins_id is present) or property_search_urls for Zillow/Redfin details.`,
+AFTER this call, offer to run parcel_lookup (if ipins_id is present) or property_search_urls to find listing details online.`,
   {
     latitude: z
       .number()
@@ -319,11 +321,12 @@ WHEN TO USE:
 - When ipins_id was absent (INTERPOLATED/STREET/POSTAL match) and parcel_lookup cannot be called
 - Always use the STANDARDIZED address from the geocoder (document.formatted_address), not the user's raw input
 
-SEARCH RULES (enforce strictly):
-- Run at most 2–3 web searches total across the entire conversation turn
-- Search Zillow and Redfin in parallel as the first 2 searches
+FETCH RULES (enforce strictly):
+- Prefer WebFetch on direct_url over WebSearch — WebFetch retrieves the actual property page with current data; WebSearch only returns snippets which may be stale or incomplete
+- Run the first 2 fetches in parallel using the provided direct_url values
+- Only fall back to web_search_query if WebFetch returns an error or no property data
 - Only add a 3rd search if both of the first two returned no useful data
-- Stop as soon as you have enough to answer — do not search for completeness
+- Stop as soon as you have enough to answer — do not fetch for completeness
 - Never re-fetch data already present in the conversation context
 
 WHAT TO LOOK FOR (only what's missing from context):
@@ -332,8 +335,8 @@ WHAT TO LOOK FOR (only what's missing from context):
   current listing status (active/pending/off-market/recently sold)
   property taxes · HOA fees
 
-Present findings as "online results" — do not mention Zillow or Redfin by name in your response.
-If neither site has a listing, say so — the address may be new, rural, or commercial.`,
+Present findings as "online results" — do not mention specific site names in your response.
+If no listing is found on any site, say so — the address may be new, rural, or commercial.`,
   {
     formatted_address: z
       .string()
@@ -350,38 +353,37 @@ If neither site has a listing, say so — the address may be new, rural, or comm
   async (params) => {
     const addr = params.formatted_address;
 
-    // Build Zillow search query URL
-    const zillowQuery = encodeURIComponent(addr);
-    const zillowUrl = `https://www.zillow.com/homes/${zillowQuery}_rb/`;
+    // Zillow property pages use hyphenated slugs (not %20-encoded)
+    // e.g. "1312 142nd Pl SW, Lynnwood WA 98087" → "1312-142nd-Pl-SW-Lynnwood-WA-98087"
+    const zillowSlug = addr.replace(/,/g, "").replace(/\s+/g, "-");
+    const zillowUrl = `https://www.zillow.com/homes/${zillowSlug}_rb/`;
     const zillowSearch = `site:zillow.com "${addr}"`;
 
-    // Build Redfin search query URL
+    // Redfin search uses encoded address
     const redfinQuery = encodeURIComponent(addr);
     const redfinUrl = `https://www.redfin.com/search#combined/${redfinQuery}`;
     const redfinSearch = `site:redfin.com "${addr}"`;
 
     const output = {
       instructions:
-        "Use WebSearch or WebFetch with the queries below. Run Zillow and Redfin in parallel as searches 1 and 2. Cap total searches at 2–3 for this address.",
+        "Prefer WebFetch on direct_url (retrieves actual property page with current data). Only fall back to web_search_query if WebFetch fails or returns no property data. Run the first 2 in parallel. Cap total fetches/searches at 2–3.",
       max_searches: 3,
       searches: [
         {
           priority: 1,
-          site: "Zillow",
           direct_url: zillowUrl,
           web_search_query: zillowSearch,
           fallback_query: `${addr} property details zillow`,
         },
         {
           priority: 2,
-          site: "Redfin",
           direct_url: redfinUrl,
           web_search_query: redfinSearch,
           fallback_query: `${addr} property details redfin`,
         },
         {
           priority: 3,
-          note: "Only use if searches 1 and 2 returned nothing useful",
+          note: "Only use if fetches 1 and 2 returned nothing useful",
           web_search_query: `${addr} property value beds baths year built`,
         },
       ],
