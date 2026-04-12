@@ -1,18 +1,22 @@
 {
-  "name": "intellipins-addressing-mcp",
+  "name": "intellipins-mcp",
   "version": "1.0.0",
-  "description": "MCP server for Intellipins geocoding and addressing APIs",
+  "description": "MCP server for Intellipins geocoding APIs",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "start:http": "MCP_TRANSPORT=http node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "dev:http": "MCP_TRANSPORT=http tsx src/index.ts",
+    "probe:http": "node scripts/probe-mcp-http.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.28.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/inspector": "^0.21.1",
     "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"

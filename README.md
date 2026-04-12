@@ -1,6 +1,6 @@
-# intellipins-addressing MCP
+# intellipins MCP
 
-An MCP server that exposes Intellipins address geocoding tools to Claude Code.
+An MCP server that exposes Intellipins address geocoding tools over stdio and Streamable HTTP.
 
 ## Prerequisites
 
@@ -55,7 +55,7 @@ source ~/.zshrc
 ### Step 4 — Register the MCP with Claude Code
 
 ```sh
-claude mcp add intellipins-addressing \
+claude mcp add intellipins \
   node "/path/to/pins-mcp/dist/index.js"
 ```
 
@@ -70,7 +70,45 @@ claude mcp list
 You should see:
 
 ```
-intellipins-addressing: ... ✓ Connected
+intellipins: ... ✓ Connected
+```
+
+## Hosting Over Streamable HTTP
+
+The server still defaults to stdio for local MCP clients, but it can now run as a hosted Streamable HTTP server.
+
+### Run locally in HTTP mode
+
+```sh
+cd /path/to/pins-mcp
+npm run build
+MCP_TRANSPORT=http PORT=3000 npm run start:http
+```
+
+You can also use the dev entrypoint:
+
+```sh
+MCP_TRANSPORT=http PORT=3000 npm run dev:http
+```
+
+### HTTP configuration
+
+- `MCP_TRANSPORT=http` or `--transport=http` enables Streamable HTTP mode
+- `PORT` or `MCP_PORT` sets the listen port. Default: `3000`
+- `HOST` or `MCP_HOST` sets the bind host. Default: `0.0.0.0`
+- `MCP_PATH` sets the MCP endpoint path. Default: `/mcp`
+- `GET /health` returns a simple health response for deployment checks
+
+Example:
+
+```sh
+HOST=0.0.0.0 PORT=8080 MCP_PATH=/mcp MCP_TRANSPORT=http node dist/index.js
+```
+
+The MCP endpoint will then be available at:
+
+```text
+http://localhost:8080/mcp
 ```
 
 ## Available Tools

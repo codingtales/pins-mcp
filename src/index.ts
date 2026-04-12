@@ -1,6 +1,8 @@
 #!/usr/bin/env node
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { deflateSync } from "node:zlib";
 
@@ -70,15 +72,16 @@ async function callApi(
   return response.json();
 }
 
-const server = new McpServer({
-  name: "intellipins-addressing",
-  version: "1.0.0",
-});
+function createMcpServer(): McpServer {
+  const server = new McpServer({
+    name: "intellipins",
+    version: "1.0.0",
+  });
 
 // ─── Tool 1: Forward Geocode ──────────────────────────────────────────────────
 
-server.tool(
-  "geocode_forward",
+  server.tool(
+    "geocode_forward",
   `Convert a street address into geographic coordinates (lat/lng), a standardized address, and a unique ipins_id.
 
 WORKFLOW: This is always the FIRST step. Run this before parcel_lookup or any property research.
@@ -156,12 +159,12 @@ AFTER this call, offer to run parcel_lookup (if ipins_id is present) or property
       content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
     };
   }
-);
+  );
 
 // ─── Tool 2: Reverse Geocode ──────────────────────────────────────────────────
 
-server.tool(
-  "geocode_reverse",
+  server.tool(
+    "geocode_reverse",
   `Convert geographic coordinates (latitude, longitude) into a standardized street address and ipins_id.
 
 WORKFLOW: Use this when the user provides lat/lng coordinates instead of a street address.
@@ -211,12 +214,12 @@ AFTER this call, offer to run parcel_lookup (if ipins_id is present) or property
       content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
     };
   }
-);
+  );
 
 // ─── Tool 3: Postal City Lookup ───────────────────────────────────────────────
 
-server.tool(
-  "postal_city_lookup",
+  server.tool(
+    "postal_city_lookup",
   `Look up ZIP codes for a given city and state.
 Returns a list of matching postal/city combinations with county and state FIPS codes.
 Use this when the user wants to know what ZIP codes cover a city, or to verify a city/state combination.`,
@@ -248,12 +251,12 @@ Use this when the user wants to know what ZIP codes cover a city, or to verify a
       content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
     };
   }
-);
+  );
 
 // ─── Tool 4: Parcel Lookup ────────────────────────────────────────────────────
 
-server.tool(
-  "parcel_lookup",
+  server.tool(
+    "parcel_lookup",
   `Retrieve parcel-level property data for an address using its ipins_id.
 
 PREREQUISITE: ipins_id must come from geocode_forward or geocode_reverse — never guess or fabricate it.
@@ -308,12 +311,12 @@ AFTER this call — do ALL of the following:
       content: [{ type: "text" as const, text: JSON.stringify(output, null, 2) }],
     };
   }
-);
+  );
 
 // ─── Tool 5: Property Search URLs ────────────────────────────────────────────
 
-server.tool(
-  "property_search_urls",
+  server.tool(
+    "property_search_urls",
   `Generate Zillow and Redfin search URLs and web search queries for a standardized address.
 
 WHEN TO USE:
@@ -394,14 +397,151 @@ If no listing is found on any site, say so — the address may be new, rural, or
       content: [{ type: "text" as const, text: JSON.stringify(output, null, 2) }],
     };
   }
-);
+  );
+
+  return server;
+}
 
 // ─── Start server ─────────────────────────────────────────────────────────────
 
+type RuntimeTransport = "stdio" | "http";
+
+function getRuntimeTransport(): RuntimeTransport {
+  const transportArg = process.argv.find((arg) => arg.startsWith("--transport="));
+  const transportValue = transportArg?.split("=")[1] ?? process.env.MCP_TRANSPORT ?? "stdio";
+  return transportValue === "http" || transportValue === "streamable-http" ? "http" : "stdio";
+}
+
+function getHttpPort(): number {
+  const rawPort = process.env.PORT ?? process.env.MCP_PORT ?? "3000";
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid HTTP port: ${rawPort}`);
+  }
+  return port;
+}
+
+function getHttpHost(): string {
+  return process.env.HOST ?? process.env.MCP_HOST ?? "0.0.0.0";
+}
+
+function getMcpPath(): string {
+  const rawPath = process.env.MCP_PATH ?? "/mcp";
+  return rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+}
+
+function setCorsHeaders(res: ServerResponse): void {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID");
+}
+
+function handleHttpRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  transport: StreamableHTTPServerTransport,
+  mcpPath: string
+): Promise<void> | void {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+  if (req.method === "OPTIONS") {
+    setCorsHeaders(res);
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (url.pathname === "/health") {
+    setCorsHeaders(res);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, transport: "streamable-http", path: mcpPath }));
+    return;
+  }
+
+  if (url.pathname !== mcpPath) {
+    setCorsHeaders(res);
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Not found" }));
+    return;
+  }
+
+  setCorsHeaders(res);
+  return transport.handleRequest(req, res);
+}
+
+async function startHttpServer(): Promise<void> {
+  const host = getHttpHost();
+  const port = getHttpPort();
+  const mcpPath = getMcpPath();
+
+  const httpServer = createServer((req, res) => {
+    if (req.method === "OPTIONS") {
+      Promise.resolve(handleHttpRequest(req, res, new StreamableHTTPServerTransport(), mcpPath)).catch(
+        (err) => {
+          console.error("HTTP transport error:", err);
+          if (!res.headersSent) {
+            setCorsHeaders(res);
+            res.writeHead(500, { "Content-Type": "application/json" });
+          }
+          res.end(JSON.stringify({ error: "Internal server error" }));
+        }
+      );
+      return;
+    }
+
+    if ((req.url ?? "").startsWith("/health")) {
+      Promise.resolve(handleHttpRequest(req, res, new StreamableHTTPServerTransport(), mcpPath)).catch(
+        (err) => {
+          console.error("HTTP transport error:", err);
+          if (!res.headersSent) {
+            setCorsHeaders(res);
+            res.writeHead(500, { "Content-Type": "application/json" });
+          }
+          res.end(JSON.stringify({ error: "Internal server error" }));
+        }
+      );
+      return;
+    }
+
+    const server = createMcpServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+
+    res.on("close", () => {
+      transport.close().catch(() => {});
+      server.close().catch(() => {});
+    });
+
+    Promise.resolve(server.connect(transport))
+      .then(() => handleHttpRequest(req, res, transport, mcpPath))
+      .catch((err) => {
+        console.error("HTTP transport error:", err);
+        if (!res.headersSent) {
+          setCorsHeaders(res);
+          res.writeHead(500, { "Content-Type": "application/json" });
+        }
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      });
+  });
+
+  httpServer.listen(port, host, () => {
+    console.error(
+      `Intellipins MCP server running on Streamable HTTP at http://${host}:${port}${mcpPath}`
+    );
+  });
+}
+
 async function main() {
+  if (getRuntimeTransport() === "http") {
+    await startHttpServer();
+    return;
+  }
+
+  const server = createMcpServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Intellipins Addressing MCP server running on stdio");
+  console.error("Intellipins MCP server running on stdio");
 }
 
 main().catch((err) => {
